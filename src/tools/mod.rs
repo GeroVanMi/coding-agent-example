@@ -5,17 +5,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::error::Error;
 
+mod bash;
 pub mod read;
 pub mod write;
-mod bash;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Function {
     pub name: String,
     pub arguments: String,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ToolCall {
     pub id: String,
     pub r#type: String,
