@@ -6,19 +6,20 @@ use async_openai::error::OpenAIError;
 use async_openai::types::chat::CreateChatCompletionResponse;
 use async_openai::{Client, config::OpenAIConfig};
 use color_eyre::Result;
+use color_eyre::owo_colors::OwoColorize;
 use crossterm::event::Event::Key;
 use crossterm::event::{Event, EventStream, KeyCode};
 use dotenvy;
-use octocrab::Page;
-use octocrab::params::Direction;
-use octocrab::params::pulls::Sort;
+use ratatui::macros::constraints;
 use ratatui::{
     DefaultTerminal, Frame,
     buffer::Buffer,
-    layout::{Constraint, Layout, Position, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Style, Stylize},
     text::Line,
-    widgets::{Block, HighlightSpacing, Paragraph, Row, StatefulWidget, Table, TableState, Widget},
+    widgets::{
+        Block, HighlightSpacing, List, Paragraph, Row, StatefulWidget, Table, TableState, Widget,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -92,6 +93,11 @@ impl App {
         let [title_area, input_area, messages_area] = frame.area().layout(&layout);
         let title = Line::from("Gero's Coding-Agent").centered().bold();
 
+        let messages_block = Block::bordered()
+            .title("Responses")
+            .title_bottom("esc to quit");
+        let messages_block_area = messages_block.inner(messages_area);
+
         let input = Paragraph::new(self.input.as_str())
             .style(Style::default().fg(Color::Yellow))
             .block(Block::bordered().title("Input"));
@@ -107,7 +113,8 @@ impl App {
             input_area.y + 1,
         ));
 
-        frame.render_widget(&self.agent_responses, messages_area);
+        frame.render_widget(messages_block, messages_area);
+        frame.render_widget(&self.agent_responses, messages_block_area);
     }
 
     fn handle_event(&mut self, event: &Event) {
@@ -270,11 +277,6 @@ impl AgentResponsesWidget {
     }
 
     async fn fetch_llm_response(self) {
-        let messages = {
-            let state = self.state.write().unwrap();
-            state.messages.clone()
-        };
-
         let api_key = env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| {
             eprintln!("OPENROUTER_API_KEY is not set");
             process::exit(1);
@@ -351,8 +353,13 @@ impl AgentResponsesWidget {
 
         let mut is_active = true;
         while is_active {
+            let messages = {
+                let state = self.state.write().unwrap();
+                state.messages.clone()
+            };
+
             counter += 1;
-            if counter > 15 {
+            if counter > 6 {
                 is_active = false;
                 {
                     let mut state = self.state.write().unwrap();
@@ -434,135 +441,54 @@ impl AgentResponsesWidget {
 
 impl Widget for &AgentResponsesWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let mut state = self.state.write().unwrap();
+        let messages = {
+            let state = self.state.write().unwrap();
+            state.messages.clone()
+        };
+        let agent_is_active = {
+            let state = self.state.read().unwrap();
+            state.agent_is_active.clone()
+        };
 
-        let mut message = "".to_string();
+        let mut last_response_message = "".to_string();
         // let mut role = "".to_string();
-        let mut agent_state = if state.agent_is_active {
+        let mut agent_state = if agent_is_active {
             "Agent Active"
         } else {
             "Agent Idle"
         }
         .to_string();
+        let mut is_tool_call = false;
 
-        if !state.messages.is_empty() {
-            let last_message = state.messages.last().unwrap().clone();
-            message = last_message.content.unwrap_or("".to_string());
-            // role = last_message.role.unwrap_or("".to_string());
+        const MAX_NUMBER_MESSAGES: usize = 4;
+        let areas = Layout::vertical([
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+        ])
+        .spacing(1)
+        .margin(1)
+        .split(area);
+
+        for (index, message) in messages.iter().rev().enumerate() {
+            if index >= MAX_NUMBER_MESSAGES {
+                return;
+            }
+
+            let message = message.clone();
+            let content = message.content.unwrap_or("".to_string()).clone();
+            is_tool_call = !message.tool_calls.is_none() || !message.tool_call_id.is_none();
+
+            let color = if is_tool_call {
+                Color::Gray
+            } else {
+                Color::White
+            };
+
+            let paragraph = Paragraph::new(content)
+                .style(Style::default().fg(color))
+                .render(areas[index], buf);
         }
-
-        let responses_block = Block::bordered()
-            .title(agent_state)
-            .title_bottom("esc to quit");
-
-        let responses = Paragraph::new(message)
-            .style(Style::default())
-            .block(responses_block);
-
-        Widget::render(responses, area, buf);
     }
 }
-
-// impl PullRequestListWidget {
-//     /// Start fetching the pull requests in the background.
-//     ///
-//     /// This method spawns a background task that fetches the pull requests from the GitHub API.
-//     /// The result of the fetch is then passed to the `on_load` or `on_err` methods.
-//     fn run(&self) {
-//         let this = self.clone(); // clone the widget to pass to the background task
-//         tokio::spawn(this.fetch_pulls());
-//     }
-//
-//     async fn fetch_pulls(self) {
-//         // this runs once, but you could also run this in a loop, using a channel that accepts
-//         // messages to refresh on demand, or with an interval timer to refresh every N seconds
-//         self.set_loading_state(LoadingState::Loading);
-//         match octocrab::instance()
-//             .pulls("ratatui", "ratatui")
-//             .list()
-//             .sort(Sort::Updated)
-//             .direction(Direction::Descending)
-//             .send()
-//             .await
-//         {
-//             Ok(page) => self.on_load(&page),
-//             Err(err) => self.on_err(&err),
-//         }
-//     }
-//     fn on_load(&self, page: &Page<OctoPullRequest>) {
-//         let prs = page.items.iter().map(Into::into);
-//         let mut state = self.state.write().unwrap();
-//         state.loading_state = LoadingState::Loaded;
-//         state.pull_requests.extend(prs);
-//         if !state.pull_requests.is_empty() {
-//             state.table_state.select(Some(0));
-//         }
-//     }
-//
-//     fn on_err(&self, err: &octocrab::Error) {
-//         self.set_loading_state(LoadingState::Error(err.to_string()));
-//     }
-//
-//     fn set_loading_state(&self, state: LoadingState) {
-//         self.state.write().unwrap().loading_state = state;
-//     }
-//
-//     fn scroll_down(&self) {
-//         self.state.write().unwrap().table_state.scroll_down_by(1);
-//     }
-//
-//     fn scroll_up(&self) {
-//         self.state.write().unwrap().table_state.scroll_up_by(1);
-//     }
-// }
-//
-// type OctoPullRequest = octocrab::models::pulls::PullRequest;
-//
-// impl From<&OctoPullRequest> for PullRequest {
-//     fn from(pr: &OctoPullRequest) -> Self {
-//         Self {
-//             id: pr.number.to_string(),
-//             title: pr.title.as_ref().unwrap().to_string(),
-//             url: pr
-//                 .html_url
-//                 .as_ref()
-//                 .map(ToString::to_string)
-//                 .unwrap_or_default(),
-//         }
-//     }
-// }
-//
-// impl Widget for &PullRequestListWidget {
-//     fn render(self, area: Rect, buf: &mut Buffer) {
-//         let mut state = self.state.write().unwrap();
-//
-//         // a block with a right aligned title with the loading state on the right
-//         let loading_state = Line::from(format!("{:?}", state.loading_state)).right_aligned();
-//         let block = Block::bordered()
-//             .title("Pull Requests")
-//             .title(loading_state)
-//             .title_bottom("j/k to scroll, q to quit");
-//
-//         // a table with the list of pull requests
-//         let rows = state.pull_requests.iter();
-//         let widths = [
-//             Constraint::Length(5),
-//             Constraint::Fill(1),
-//             Constraint::Max(49),
-//         ];
-//         let table = Table::new(rows, widths)
-//             .block(block)
-//             .highlight_spacing(HighlightSpacing::Always)
-//             .highlight_symbol(">>")
-//             .row_highlight_style(Style::new().on_blue());
-//
-//         StatefulWidget::render(table, area, buf, &mut state.table_state);
-//     }
-// }
-//
-// impl From<&PullRequest> for Row<'_> {
-//     fn from(pr: &PullRequest) -> Self {
-//         let pr = pr.clone();
-//         Row::new(vec![pr.id, pr.title, pr.url])
-//     }
-// }
