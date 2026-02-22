@@ -1,18 +1,17 @@
 mod tools;
 
-use crate::tools::ToolCall;
+use crate::tools::{ToolCall, handle_tool_call};
 
-use serde::{Deserialize, Serialize};
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
-
+use async_openai::error::OpenAIError;
+use async_openai::types::chat::CreateChatCompletionResponse;
+use async_openai::{Client, config::OpenAIConfig};
 use color_eyre::Result;
 use crossterm::event::Event::Key;
 use crossterm::event::{Event, EventStream, KeyCode};
+use dotenvy;
 use octocrab::Page;
 use octocrab::params::Direction;
 use octocrab::params::pulls::Sort;
-
 use ratatui::{
     DefaultTerminal, Frame,
     buffer::Buffer,
@@ -21,6 +20,12 @@ use ratatui::{
     text::Line,
     widgets::{Block, HighlightSpacing, Paragraph, Row, StatefulWidget, Table, TableState, Widget},
 };
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::env;
+use std::process;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tokio_stream::StreamExt;
 
 // #[derive(Parser)]
@@ -38,10 +43,11 @@ struct Message {
     tool_calls: Option<Vec<ToolCall>>,
 }
 
-// const LLM_MODEL: &str = "mistralai/devstral-2512";
+const LLM_MODEL: &str = "mistralai/devstral-2512";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
     color_eyre::install()?;
     let terminal = ratatui::init();
     let app_result = App::default().run(terminal).await;
@@ -53,6 +59,7 @@ async fn main() -> Result<()> {
 struct App {
     should_quit: bool,
     // pull_requests: PullRequestListWidget,
+    agent_responses: AgentResponsesWidget,
     character_index: usize,
     input: String,
 }
@@ -100,7 +107,7 @@ impl App {
             input_area.y + 1,
         ));
 
-        // frame.render_widget(&self.pull_requests, body_area);
+        frame.render_widget(&self.agent_responses, messages_area);
     }
 
     fn handle_event(&mut self, event: &Event) {
@@ -108,7 +115,7 @@ impl App {
             match key.code {
                 KeyCode::Esc => self.should_quit = true,
                 KeyCode::Char(to_insert) => self.enter_char(to_insert),
-                // KeyCode::Enter => self.submit_message(),
+                KeyCode::Enter => self.submit_message(),
                 KeyCode::Backspace => self.delete_char(),
                 KeyCode::Left => self.move_cursor_left(),
                 KeyCode::Right => self.move_cursor_right(),
@@ -169,7 +176,32 @@ impl App {
         }
     }
 
-    fn submit_answer() {}
+    fn submit_message(&mut self) {
+        // TODO: Check if the last message has been processed
+
+        // Abort if the input is empty
+        if self.input.is_empty() {
+            return;
+        }
+
+        if (self.input == "/clear") {
+            self.clear_messages();
+            self.clear_input();
+            return;
+        }
+
+        self.agent_responses.run(self.input.clone());
+        self.clear_input();
+    }
+
+    fn clear_input(&mut self) {
+        self.input = String::new();
+        self.character_index = 0;
+    }
+
+    fn clear_messages(&mut self) {
+        self.agent_responses.clear_messages();
+    }
 }
 
 // #[derive(Debug, Clone, Default)]
@@ -210,88 +242,224 @@ struct AgentResponsesWidget {
 struct AgentResponsesState {
     messages: Vec<Message>,
     loading_state: LoadingState,
-    table_state: TableState,
+    agent_is_active: bool,
+    // table_state: TableState,
 }
 
 impl AgentResponsesWidget {
     /// Start fetching the LLM response in the background.
-    fn run(&self) {
+    fn run(&self, user_message: String) {
         let this = self.clone();
+        let mut state = self.state.write().unwrap();
+
+        // TODO: This is a stopgap measure to prevent user from starting multiple agent loops
+        //       There needs to be some user feedback for this.
+        if state.agent_is_active {
+            return;
+        }
+
+        state.messages.push(Message {
+            role: Some("user".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+            content: Some(user_message),
+        });
+        state.agent_is_active = true;
+
         tokio::spawn(this.fetch_llm_response());
     }
 
     async fn fetch_llm_response(self) {
-        //
-        //     let api_key = env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| {
-        //         eprintln!("OPENROUTER_API_KEY is not set");
-        //         process::exit(1);
-        //     });
-        //
-        //     let config = OpenAIConfig::new()
-        //         .with_api_base(base_url)
-        //         .with_api_key(api_key);
-        //
-        //     let client = Client::with_config(config);
-        //
-        //     let read_tool = json!({
-        //         "type": "function",
-        //         "function": {
-        //             "name": "Read",
-        //             "description": "Read and return the contents of a file",
-        //             "parameters": {
-        //                 "type": "object",
-        //                 "required": ["file_path"],
-        //                 "properties": {
-        //                     "file_path": {
-        //                         "type": "string",
-        //                         "description": "The path to the file to read",
-        //                     },
-        //                 },
-        //             },
-        //         }
-        //     });
-        //
-        //     let write_tool = json!({
-        //           "type": "function",
-        //           "function": {
-        //             "name": "Write",
-        //             "description": "Write content to a file",
-        //             "parameters": {
-        //               "type": "object",
-        //               "required": ["file_path", "content"],
-        //               "properties": {
-        //                 "file_path": {
-        //                   "type": "string",
-        //                   "description": "The path of the file to write to"
-        //                 },
-        //                 "content": {
-        //                   "type": "string",
-        //                   "description": "The content to write to the file"
-        //                 }
-        //               }
-        //             }
-        //           }
-        //         }
-        //     );
-        //
-        //     let bash_tool = json!({
-        //           "type": "function",
-        //           "function": {
-        //             "name": "Bash",
-        //             "description": "Execute a shell command",
-        //             "parameters": {
-        //               "type": "object",
-        //               "required": ["command"],
-        //               "properties": {
-        //                 "command": {
-        //                   "type": "string",
-        //                   "description": "The command to execute"
-        //                 }
-        //               }
-        //             }
-        //           }
-        //         }
-        //     );
+        let messages = {
+            let state = self.state.write().unwrap();
+            state.messages.clone()
+        };
+
+        let api_key = env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| {
+            eprintln!("OPENROUTER_API_KEY is not set");
+            process::exit(1);
+        });
+
+        let base_url = env::var("OPENROUTER_BASE_URL")
+            .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
+
+        let config = OpenAIConfig::new()
+            .with_api_base(base_url)
+            .with_api_key(api_key);
+
+        let client = Client::with_config(config);
+
+        let read_tool = json!({
+            "type": "function",
+            "function": {
+                "name": "Read",
+                "description": "Read and return the contents of a file",
+                "parameters": {
+                    "type": "object",
+                    "required": ["file_path"],
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "The path to the file to read",
+                        },
+                    },
+                },
+            }
+        });
+
+        let write_tool = json!({
+          "type": "function",
+          "function": {
+            "name": "Write",
+            "description": "Write content to a file",
+            "parameters": {
+              "type": "object",
+              "required": ["file_path", "content"],
+              "properties": {
+                "file_path": {
+                  "type": "string",
+                  "description": "The path of the file to write to"
+                },
+                "content": {
+                  "type": "string",
+                  "description": "The content to write to the file"
+                }
+              }
+            }
+          }
+        });
+
+        let bash_tool = json!({
+          "type": "function",
+          "function": {
+            "name": "Bash",
+            "description": "Execute a shell command",
+            "parameters": {
+              "type": "object",
+              "required": ["command"],
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "description": "The command to execute"
+                }
+              }
+            }
+          }
+        });
+
+        let mut counter = 0;
+
+        let mut is_active = true;
+        while is_active {
+            counter += 1;
+            if counter > 15 {
+                is_active = false;
+                {
+                    let mut state = self.state.write().unwrap();
+                    state.agent_is_active = false;
+                }
+                break;
+            }
+
+            let openrouter_response: Result<Value, OpenAIError> = client
+                .chat()
+                .create_byot(json!({
+                    "messages": json!(messages),
+                    "model": LLM_MODEL,
+                    "tools": [
+                        read_tool,
+                        write_tool,
+                        bash_tool,
+                    ]
+                }))
+                .await;
+
+            match openrouter_response {
+                Ok(response) => {
+                    let assistant_response =
+                        match Message::deserialize(response["choices"][0]["message"].clone()) {
+                            Ok(message) => message,
+                            Err(error) => panic!("Failed to deserialize message: {:?}", error),
+                        };
+
+                    // Lock the state, write to it and unlock it again.
+                    {
+                        let mut state = self.state.write().unwrap();
+                        state.messages.push(assistant_response.clone());
+                    }
+
+                    if let Some(tools) = assistant_response.tool_calls {
+                        for tool_call in tools {
+                            let tool_call_result = match handle_tool_call(&tool_call) {
+                                Ok(tool_call_result) => tool_call_result,
+                                Err(error) => panic!("Failed to handle tool call: {:?}", error),
+                            };
+
+                            {
+                                let mut state = self.state.write().unwrap();
+                                state.messages.push(Message {
+                                    tool_call_id: Some(tool_call_result.id),
+                                    content: Some(tool_call_result.content.clone()),
+                                    role: Some("tool".to_string()),
+                                    tool_calls: None,
+                                });
+                            }
+                        }
+                    } else {
+                        {
+                            let mut state = self.state.write().unwrap();
+                            state.agent_is_active = false;
+                        }
+                        is_active = false;
+                    }
+                }
+                Err(error) => {
+                    // eprintln!("Agent error occurred while fetching llm response. {}");
+                    {
+                        let mut state = self.state.write().unwrap();
+                        state.agent_is_active = false;
+                    }
+                    is_active = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn clear_messages(&self) {
+        let mut state = self.state.write().unwrap();
+        state.messages.clear();
+    }
+}
+
+impl Widget for &AgentResponsesWidget {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let mut state = self.state.write().unwrap();
+
+        let mut message = "".to_string();
+        // let mut role = "".to_string();
+        let mut agent_state = if state.agent_is_active {
+            "Agent Active"
+        } else {
+            "Agent Idle"
+        }
+        .to_string();
+
+        if !state.messages.is_empty() {
+            let last_message = state.messages.last().unwrap().clone();
+            message = last_message.content.unwrap_or("".to_string());
+            // role = last_message.role.unwrap_or("".to_string());
+        }
+
+        let responses_block = Block::bordered()
+            .title(agent_state)
+            .title_bottom("esc to quit");
+
+        let responses = Paragraph::new(message)
+            .style(Style::default())
+            .block(responses_block);
+
+        Widget::render(responses, area, buf);
     }
 }
 
@@ -397,160 +565,4 @@ impl AgentResponsesWidget {
 //         let pr = pr.clone();
 //         Row::new(vec![pr.id, pr.title, pr.url])
 //     }
-// }
-
-// #[tokio::main]
-// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//     let args = Args::parse();
-//
-//     dotenvy::dotenv().ok();
-//
-//     let base_url = env::var("OPENROUTER_BASE_URL")
-//         .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
-//
-//     let api_key = env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| {
-//         eprintln!("OPENROUTER_API_KEY is not set");
-//         process::exit(1);
-//     });
-//
-//     let config = OpenAIConfig::new()
-//         .with_api_base(base_url)
-//         .with_api_key(api_key);
-//
-//     let client = Client::with_config(config);
-//
-//     let read_tool = json!({
-//         "type": "function",
-//         "function": {
-//             "name": "Read",
-//             "description": "Read and return the contents of a file",
-//             "parameters": {
-//                 "type": "object",
-//                 "required": ["file_path"],
-//                 "properties": {
-//                     "file_path": {
-//                         "type": "string",
-//                         "description": "The path to the file to read",
-//                     },
-//                 },
-//             },
-//         }
-//     });
-//
-//     let write_tool = json!({
-//           "type": "function",
-//           "function": {
-//             "name": "Write",
-//             "description": "Write content to a file",
-//             "parameters": {
-//               "type": "object",
-//               "required": ["file_path", "content"],
-//               "properties": {
-//                 "file_path": {
-//                   "type": "string",
-//                   "description": "The path of the file to write to"
-//                 },
-//                 "content": {
-//                   "type": "string",
-//                   "description": "The content to write to the file"
-//                 }
-//               }
-//             }
-//           }
-//         }
-//     );
-//
-//     let bash_tool = json!({
-//           "type": "function",
-//           "function": {
-//             "name": "Bash",
-//             "description": "Execute a shell command",
-//             "parameters": {
-//               "type": "object",
-//               "required": ["command"],
-//               "properties": {
-//                 "command": {
-//                   "type": "string",
-//                   "description": "The command to execute"
-//                 }
-//               }
-//             }
-//           }
-//         }
-//     );
-//
-//     let initial_message = Message {
-//         role: Some("user".to_string()),
-//         content: Some(args.prompt),
-//         tool_call_id: None,
-//         tool_calls: None,
-//     };
-//
-//     let mut messages: Vec<Message> = vec![initial_message];
-//
-//     let mut is_running = true;
-//     let mut counter = 0;
-//
-//     while (is_running) {
-//         // for message in &mut messages {
-//         //     display_message(message.clone())
-//         // }
-//
-//         counter += 1;
-//         if (counter > 15) {
-//             is_running = false;
-//         }
-//
-//         #[allow(unused_variables)]
-//         let response: Value = client
-//             .chat()
-//             .create_byot(json!({
-//                 "messages": json!(messages),
-//                 "model": LLM_MODEL,
-//                 "tools": [
-//                     read_tool,
-//                     write_tool,
-//                     bash_tool,
-//                 ]
-//             }))
-//             .await?;
-//
-//         // You can use print statements as follows for debugging, they'll be visible when running tests.
-//
-//         let assistant_response =
-//             match Message::deserialize(response["choices"][0]["message"].clone()) {
-//                 Ok(message) => message,
-//                 Err(error) => panic!("Failed to deserialize message: {:?}", error),
-//             };
-//
-//         messages.push(assistant_response.clone());
-//
-//         if let Some(tools) = assistant_response.tool_calls {
-//             for tool_call in tools {
-//                 let tool_call_result = match handle_tool_call(&tool_call) {
-//                     Ok(tool_call_result) => tool_call_result,
-//                     Err(error) => panic!("Failed to handle tool call: {:?}", error),
-//                 };
-//
-//                 messages.push(Message {
-//                     tool_call_id: Some(tool_call_result.id),
-//                     content: Some(tool_call_result.content.clone()),
-//                     role: Some("tool".to_string()),
-//                     tool_calls: None,
-//                 });
-//             }
-//         } else {
-//             if let Some(content) = assistant_response.content {
-//                 print!("{}", content);
-//             }
-//
-//             is_running = false;
-//         }
-//     }
-//
-//     Ok(())
-// }
-
-// fn display_message(message: Message) {
-//     println!("{}", json!(message));
 // }
